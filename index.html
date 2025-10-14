@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CSV → questions.js Builder</title>
+<style>
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; line-height: 1.4; }
+  h1 { font-size: 1.2rem; margin: 0 0 8px; }
+  .row { display: grid; gap: 12px; grid-template-columns: 1fr; max-width: 1100px; }
+  textarea, pre, input, button { width: 100%; padding: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  textarea, pre { border: 1px solid #ddd; border-radius: 8px; min-height: 200px; }
+  pre { background: #0b0c0f; color: #e9ecf1; }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .inline { display: inline-flex; gap: 8px; align-items: center; }
+  small { color: #666; }
+</style>
+</head>
+<body>
+  <h1>CSV → questions.js Builder</h1>
+  <p>Columns required: <code>text, A, B, C, D, correct</code>. Export from Excel/Sheets as CSV, then either <strong>paste</strong> or <strong>import a file</strong> below and click Convert.</p>
+
+  <div class="row">
+    <div class="controls">
+      <label class="inline">Start ID:
+        <input id="startId" type="number" value="1" min="1" style="max-width: 120px;">
+      </label>
+      <button id="convertBtn">Convert</button>
+      <button id="downloadBtn" disabled>Download questions.js</button>
+      <label class="inline">
+        <input id="fileInput" type="file" accept=".csv,text/csv"> Import CSV
+      </label>
+    </div>
+
+    <textarea id="csv" placeholder="Paste CSV here… (or use Import CSV)"></textarea>
+
+    <pre id="output" placeholder="Generated questions.js will appear here"></pre>
+    <small>Tip: Auto-detects comma, semicolon, or tab separators. “correct” must be A/B/C/D.</small>
+  </div>
+
+<script>
+(function(){
+  const el = {
+    startId: document.getElementById('startId'),
+    csv: document.getElementById('csv'),
+    output: document.getElementById('output'),
+    convertBtn: document.getElementById('convertBtn'),
+    downloadBtn: document.getElementById('downloadBtn'),
+    fileInput: document.getElementById('fileInput'),
+  };
+
+  // --- File import ---
+  el.fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const text = await file.text();
+    el.csv.value = text;
+  });
+
+  function parseCSV(raw) {
+    const sep = detectSeparator(raw);
+    const lines = raw.replace(/\r\n?/g, '\n').split('\n').filter(l => l.trim().length > 0);
+    const rows = lines.map(line => splitLine(line, sep));
+    return rows;
+  }
+
+  function detectSeparator(text) {
+    const first = text.split('\n').find(l => l.trim().length > 0) || '';
+    const counts = { ',': (first.match(/,/g)||[]).length, ';': (first.match(/;/g)||[]).length, '\t': (first.match(/\t/g)||[]).length };
+    return Object.entries(counts).sort((a,b)=>b[1]-a[1])[0][0] || ',';
+  }
+
+  function splitLine(line, sep) {
+    const out = [];
+    let cur = '', inQ = false;
+    for (let i=0;i<line.length;i++){
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQ && line[i+1] === '"') { cur += '"'; i++; } // escaped quote
+        else inQ = !inQ;
+      } else if (ch === sep && !inQ) {
+        out.push(cur); cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    out.push(cur);
+    return out.map(s => s.trim());
+  }
+
+  function buildQuestions(rows, startId) {
+    if (!rows.length) throw new Error('No CSV rows found.');
+    const headers = rows[0].map(h => h.trim().toLowerCase());
+    const idx = {
+      text: headers.indexOf('text'),
+      A: headers.indexOf('a'),
+      B: headers.indexOf('b'),
+      C: headers.indexOf('c'),
+      D: headers.indexOf('d'),
+      correct: headers.indexOf('correct'),
+    };
+    for (const k of ['text','A','B','C','D','correct']) {
+      if (idx[k] === -1) throw new Error(`Missing required column: ${k}`);
+    }
+
+    const letters = ['A','B','C','D'];
+    const list = [];
+    for (let r=1; r<rows.length; r++){
+      const row = rows[r];
+      if (row.every(cell => cell === '')) continue;
+      const text = row[idx.text];
+      const options = [row[idx.A], row[idx.B], row[idx.C], row[idx.D]];
+      const correctLetter = String(row[idx.correct] || '').trim().toUpperCase();
+      const correctIndex = letters.indexOf(correctLetter);
+      if (!text) throw new Error(`Row ${r+1}: empty question text`);
+      if (options.some(o => o === undefined)) throw new Error(`Row ${r+1}: missing option`);
+      if (correctIndex === -1) throw new Error(`Row ${r+1}: correct must be A/B/C/D`);
+      list.push({ id: startId + (r-1), text, options, correctIndex });
+    }
+    return list;
+  }
+
+  function toQuestionsJS(list) {
+    const body = list.map(q => {
+      const esc = s => (s ?? '').replace(/\\/g,'\\\\').replace(/`/g,'\\`');
+      return `  {\n    id: ${q.id},\n    text: \`${esc(q.text)}\`,\n    options: [\`${esc(q.options[0])}\`, \`${esc(q.options[1])}\`, \`${esc(q.options[2])}\`, \`${esc(q.options[3])}\`],\n    correctIndex: ${q.correctIndex}\n  }`;
+    }).join(',\n');
+
+    return `// Generated by CSV → questions.js Builder\nwindow.QUESTIONS = [\n${body}\n];\n`;
+  }
+
+  function download(filename, text) {
+    const blob = new Blob([text], {type: "text/javascript;charset=utf-8"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 0);
+  }
+
+  el.convertBtn.addEventListener('click', () => {
+    try {
+      const raw = el.csv.value.trim();
+      if (!raw) throw new Error('Paste CSV or import a CSV file first.');
+      const rows = parseCSV(raw);
+      const startId = Math.max(1, parseInt(el.startId.value || '1', 10));
+      const list = buildQuestions(rows, startId);
+      const js = toQuestionsJS(list);
+      el.output.textContent = js;
+      el.downloadBtn.disabled = false;
+      el.downloadBtn.onclick = () => download('questions.js', js);
+    } catch (err) {
+      el.output.textContent = `// ERROR: ${err.message}`;
+      el.downloadBtn.disabled = true;
+    }
+  });
+})();
+</script>
+</body>
+</html>
